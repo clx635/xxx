@@ -158,6 +158,8 @@ jobs:
         run: |
           set -euo pipefail
           echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          GRADLE_TASK=":app:assembleDebug"
+          GRADLE_ARGS=(--stacktrace --info --no-daemon --no-parallel --max-workers=1 -Pkotlin.compiler.execution.strategy=in-process)
 
           if [ -f "./gradlew" ]; then
             sed -i 's/\r$//' ./gradlew
@@ -165,12 +167,16 @@ jobs:
             chmod +x ./gradlew
             ./gradlew --version
             set +e
-            ./gradlew :app:assembleDebug --stacktrace --info --no-daemon 2>&1 | tee build.log
+            ./gradlew "$GRADLE_TASK" "${GRADLE_ARGS[@]}" 2>&1 | tee build.log
             BUILD_EXIT=${PIPESTATUS[0]}
             set -e
             if [ "$BUILD_EXIT" -ne 0 ]; then
-              echo "== Build failed, tail build.log =="
-              tail -n 300 build.log || true
+              echo "== Build failed, summary =="
+              grep -nE "FAILURE: Build failed|\\* What went wrong:|\\* Exception is:|\\* Try:|Caused by:|^> Task |OutOfMemoryError|Kotlin daemon|Compilation error" build.log | tail -n 200 || true
+              echo "== Build failed, FAILURE section (first 220 lines) =="
+              awk 'c||/FAILURE: Build failed with an exception\./{c=220} c-->0{print}' build.log || true
+              echo "== Build failed, tail build.log (last 1200 lines) =="
+              tail -n 1200 build.log || true
               exit "$BUILD_EXIT"
             fi
             exit 0
@@ -182,12 +188,16 @@ jobs:
           export PATH="$HOME/gradle-8.7/bin:$PATH"
           gradle -v
           set +e
-          gradle :app:assembleDebug --stacktrace --info --no-daemon 2>&1 | tee build.log
+          gradle "$GRADLE_TASK" "${GRADLE_ARGS[@]}" 2>&1 | tee build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           set -e
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            echo "== Build failed, tail build.log =="
-            tail -n 300 build.log || true
+            echo "== Build failed, summary =="
+            grep -nE "FAILURE: Build failed|\\* What went wrong:|\\* Exception is:|\\* Try:|Caused by:|^> Task |OutOfMemoryError|Kotlin daemon|Compilation error" build.log | tail -n 200 || true
+            echo "== Build failed, FAILURE section (first 220 lines) =="
+            awk 'c||/FAILURE: Build failed with an exception\./{c=220} c-->0{print}' build.log || true
+            echo "== Build failed, tail build.log (last 1200 lines) =="
+            tail -n 1200 build.log || true
             exit "$BUILD_EXIT"
           fi
 
@@ -206,3 +216,4 @@ jobs:
         with:
           name: debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+
