@@ -1,0 +1,208 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4096m -Dfile.encoding=UTF-8
+      JAVA_TOOL_OPTIONS: -Xmx4096m -Dfile.encoding=UTF-8
+      KOTLIN_DAEMON_JVMARGS: -Xmx2048m
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install required tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y unzip zip file curl
+
+      - name: Resolve project directory
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "== Repo root files =="
+          ls -la
+
+          find_project_dir() {
+            local base="$1"
+            local d=""
+            d="$(find "$base" -maxdepth 12 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -printf "%h\n" 2>/dev/null | head -n 1 || true)"
+            if [ -z "$d" ]; then
+              return 1
+            fi
+            if [ -f "$d/app/build.gradle" ] || [ -f "$d/app/build.gradle.kts" ]; then
+              echo "$d"
+              return 0
+            fi
+            return 1
+          }
+
+          PROJECT_DIR="$(find_project_dir "." || true)"
+
+          if [ -z "$PROJECT_DIR" ]; then
+            ZIP_FILE=""
+            if [ -f "hc06_android.zip" ]; then
+              ZIP_FILE="hc06_android.zip"
+            elif [ -f "hc06_android.ZIP" ]; then
+              ZIP_FILE="hc06_android.ZIP"
+            else
+              ZIP_FILE="$(find . -maxdepth 2 -type f -iname "*.zip" -printf "%p\n" 2>/dev/null | head -n 1 || true)"
+            fi
+            if [ -z "$ZIP_FILE" ]; then
+              echo "No .zip found in repo (checked maxdepth 2, case-insensitive)"
+              exit 2
+            fi
+
+            echo "== Zip selected =="
+            echo "$ZIP_FILE"
+            ls -la "$ZIP_FILE" || true
+            file "$ZIP_FILE" || true
+            echo "== Zip file head (first 5 lines) =="
+            head -n 5 "$ZIP_FILE" || true
+
+            echo "== Zip test =="
+            unzip -t "$ZIP_FILE" | head -n 50 || true
+
+            echo "== Zip listing (head) =="
+            unzip -l "$ZIP_FILE" | head -n 80 || true
+
+            UNPACK_DIR="__unpacked"
+            rm -rf "$UNPACK_DIR"
+            mkdir -p "$UNPACK_DIR"
+            unzip -q "$ZIP_FILE" -d "$UNPACK_DIR"
+            echo "== Unpacked tree (top) =="
+            ls -la "$UNPACK_DIR" || true
+
+            PROJECT_DIR="$(find_project_dir "$UNPACK_DIR" || true)"
+          fi
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "Project directory not found (need settings.gradle(.kts) + app/build.gradle(.kts))"
+            echo "== Repo root =="
+            ls -la
+            echo "== Unpacked (top) =="
+            ls -la "__unpacked" || true
+            exit 3
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Resolved PROJECT_DIR=$PROJECT_DIR"
+          ls -la "$PROJECT_DIR" || true
+          ls -la "$PROJECT_DIR/app" || true
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          SDKMANAGER=""
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+
+          for p in \
+            "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$ANDROID_SDK_ROOT/cmdline-tools/bin/sdkmanager" \
+            "$ANDROID_SDK_ROOT/tools/bin/sdkmanager"
+          do
+            if [ -z "$SDKMANAGER" ] && [ -x "$p" ]; then
+              SDKMANAGER="$p"
+            fi
+          done
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "sdkmanager not found, installing Android cmdline-tools"
+            mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+            curl -sLo cmdline-tools.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+            if [ -d "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" ]; then
+              rm -rf "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+              mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+            fi
+            SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          fi
+
+          echo "Using sdkmanager: $SDKMANAGER"
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses
+          set -o pipefail
+          echo "== Installing required Android SDK packages =="
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          echo "== Installed packages (filtered) =="
+          "$SDKMANAGER" --list_installed | grep -E "platform-tools|platforms;android-34|build-tools;34.0.0" || true
+
+      - name: Build Debug APK (prefer Gradle Wrapper)
+        shell: bash
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -euo pipefail
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+
+          if [ -f "./gradlew" ]; then
+            sed -i 's/\r$//' ./gradlew
+            sed -i 's/\r$//' ./gradle/wrapper/gradle-wrapper.properties 2>/dev/null || true
+            chmod +x ./gradlew
+            ./gradlew --version
+            set +e
+            ./gradlew :app:assembleDebug --stacktrace --info --no-daemon 2>&1 | tee build.log
+            BUILD_EXIT=${PIPESTATUS[0]}
+            set -e
+            if [ "$BUILD_EXIT" -ne 0 ]; then
+              echo "== Build failed, tail build.log =="
+              tail -n 300 build.log || true
+              exit "$BUILD_EXIT"
+            fi
+            exit 0
+          fi
+
+          echo "Gradle Wrapper not found, installing Gradle 8.7"
+          curl -sLo gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip -d "$HOME"
+          export PATH="$HOME/gradle-8.7/bin:$PATH"
+          gradle -v
+          set +e
+          gradle :app:assembleDebug --stacktrace --info --no-daemon 2>&1 | tee build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          set -e
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            echo "== Build failed, tail build.log =="
+            tail -n 300 build.log || true
+            exit "$BUILD_EXIT"
+          fi
+
+      - name: Upload build logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            ${{ env.PROJECT_DIR }}/build.log
+            ${{ env.PROJECT_DIR }}/**/build/reports/**
+            ${{ env.PROJECT_DIR }}/**/build/outputs/logs/**
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
